@@ -2,16 +2,20 @@
 """HK eShop Price Tracker - 每日扫描入口"""
 
 import argparse
+import re
 import sys
 import os
 
 # 确保项目根目录在path中
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from src.database import init_db, upsert_game, insert_price, get_latest_price
+from src.database import (
+    init_db, upsert_game, insert_price,
+    get_latest_price_by_eshop_id, save_alerts,
+)
 from src.browser import create_browser, close_browser
 from src.scraper import scrape_all_pages
-from src.price_tracker import detect_changes, save_alerts
+from src.price_tracker import detect_changes
 
 
 def parse_price(value):
@@ -47,6 +51,10 @@ def main():
         # 3. 爬取所有页面
         all_games = scrape_all_pages(page, max_pages=args.pages)
 
+        # 3.5 扫描结果异常检测
+        if len(all_games) < 100 and args.pages is None:
+            print(f"⚠️ 警告：本次只扫描到 {len(all_games)} 个游戏，可能是网站结构变化或被封，请手动检查")
+
         # 4. 处理每个游戏
         stats = {'total': 0, 'new': 0, 'new_sale': 0, 'sale_ended': 0,
                  'price_drop': 0, 'price_increase': 0}
@@ -58,17 +66,21 @@ def main():
             if current_price is None:
                 continue
 
-            # a. upsert游戏信息
-            is_new = get_latest_price_by_url(game['url']) is None
+            # a. 判断是否新游戏
+            match = re.search(r'/(\d{10,})$', game['url'])
+            eshop_id = match.group(1) if match else None
+            is_new = (eshop_id and get_latest_price_by_eshop_id(eshop_id) is None)
+
+            # b. upsert游戏信息
             game_id = upsert_game(game)
 
-            # b. 检测价格变动
+            # c. 检测价格变动
             alerts = detect_changes(game_id, current_price, original_price)
 
-            # c. 插入价格记录
+            # d. 插入价格记录
             insert_price(game_id, current_price, original_price)
 
-            # d. 保存alerts
+            # e. 保存alerts
             save_alerts(alerts)
 
             # 统计
@@ -90,26 +102,6 @@ def main():
     finally:
         # 6. 关闭浏览器
         close_browser()
-
-
-def get_latest_price_by_url(url):
-    """通过URL查询是否已有价格记录（用于判断是否新增游戏）"""
-    import re
-    import sqlite3
-    from src.config import DB_PATH
-    match = re.search(r'/(\d{10,})$', url)
-    if not match:
-        return None
-    eshop_id = match.group(1)
-    conn = sqlite3.connect(DB_PATH)
-    row = conn.execute("""
-        SELECT ph.id FROM games g
-        JOIN price_history ph ON ph.game_id = g.id
-        WHERE g.eshop_id = ?
-        LIMIT 1
-    """, (eshop_id,)).fetchone()
-    conn.close()
-    return row
 
 
 if __name__ == '__main__':

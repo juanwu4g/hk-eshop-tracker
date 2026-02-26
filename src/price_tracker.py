@@ -1,6 +1,4 @@
 from src.database import get_latest_price
-import sqlite3
-from src.config import DB_PATH
 
 
 def detect_changes(game_id, new_price, new_original):
@@ -53,16 +51,3 @@ def detect_changes(game_id, new_price, new_original):
         })
 
     return alerts
-
-
-def save_alerts(alerts):
-    """批量写入price_alerts表"""
-    if not alerts:
-        return
-    conn = sqlite3.connect(DB_PATH)
-    conn.executemany("""
-        INSERT INTO price_alerts (game_id, alert_type, old_price, new_price)
-        VALUES (:game_id, :alert_type, :old_price, :new_price)
-    """, alerts)
-    conn.commit()
-    conn.close()
