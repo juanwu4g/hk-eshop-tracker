@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """HK eShop 减价页监控 - 每6小时检查折扣变化"""
 
-import signal
 import sys
 import os
-
-GLOBAL_TIMEOUT = 300  # 5分钟全局超时
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -29,16 +26,7 @@ def parse_price(value):
         return None
 
 
-def _timeout_handler(signum, frame):
-    print(f"\n❌ 全局超时（{GLOBAL_TIMEOUT}秒），强制退出")
-    close_browser()
-    sys.exit(2)
-
-
 def main():
-    signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(GLOBAL_TIMEOUT)
-
     init_db()
 
     print("启动浏览器...")
@@ -80,7 +68,6 @@ def main():
         print(f"价格变动: {price_changes} ({stats['new_sale']}个新折扣, {stats['sale_ended']}个折扣结束, {stats['price_drop'] + stats['price_increase']}个价格变动)")
 
     finally:
-        signal.alarm(0)
         close_browser()
 
 
