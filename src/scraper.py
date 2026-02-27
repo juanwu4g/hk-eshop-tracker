@@ -25,17 +25,18 @@ def scrape_page(page):
     return page.evaluate(JS_EXTRACT_ITEMS)
 
 
-def scrape_all_pages(page, max_pages=None):
-    """遍历所有列表页，返回去重后的全部商品"""
+def scrape_all_pages(page, max_pages=None, url_template=None):
+    """遍历所有列表页，返回去重后的全部商品。url_template 可自定义，需含 {page} 占位符。"""
     all_games = []
     seen_urls = set()
     page_num = 1
+    template = url_template or (BASE_URL + LIST_URL_TEMPLATE)
 
     while True:
         if max_pages and page_num > max_pages:
             break
 
-        url = BASE_URL + LIST_URL_TEMPLATE.format(page=page_num)
+        url = template.format(page=page_num)
         print(f"正在爬取第{page_num}页...")
 
         ok = navigate(page, url)

@@ -3,8 +3,11 @@
 
 import argparse
 import re
+import signal
 import sys
 import os
+
+GLOBAL_TIMEOUT = 1200  # 20分钟全局超时
 
 # 确保项目根目录在path中
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -28,6 +31,12 @@ def parse_price(value):
         return None
 
 
+def _timeout_handler(signum, frame):
+    print(f"\n❌ 全局超时（{GLOBAL_TIMEOUT}秒），强制退出")
+    close_browser()
+    sys.exit(2)
+
+
 def main():
     parser = argparse.ArgumentParser(description='HK eShop 价格扫描')
     parser.add_argument('--headless', action='store_true', default=True,
@@ -36,9 +45,15 @@ def main():
                         help='有头模式运行（调试用）')
     parser.add_argument('--pages', type=int, default=None,
                         help='限制爬取页数（调试用）')
+    parser.add_argument('--timeout', type=int, default=GLOBAL_TIMEOUT,
+                        help=f'全局超时秒数（默认{GLOBAL_TIMEOUT}）')
     args = parser.parse_args()
 
     headless = not args.no_headless
+
+    # 设置全局超时
+    signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.alarm(args.timeout)
 
     # 1. 初始化数据库
     init_db()
@@ -54,6 +69,7 @@ def main():
         # 3.5 扫描结果异常检测
         if len(all_games) < 100 and args.pages is None:
             print(f"⚠️ 警告：本次只扫描到 {len(all_games)} 个游戏，可能是网站结构变化或被封，请手动检查")
+            sys.exit(1)
 
         # 4. 处理每个游戏
         stats = {'total': 0, 'new': 0, 'new_sale': 0, 'sale_ended': 0,
@@ -100,7 +116,7 @@ def main():
         print(f"价格变动: {price_changes} ({stats['new_sale']}个新折扣, {stats['sale_ended']}个折扣结束, {stats['price_drop'] + stats['price_increase']}个价格变动)")
 
     finally:
-        # 6. 关闭浏览器
+        signal.alarm(0)  # 取消超时
         close_browser()
 
 

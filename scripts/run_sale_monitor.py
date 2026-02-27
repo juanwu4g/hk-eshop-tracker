@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """HK eShop 减价页监控 - 每6小时检查折扣变化"""
 
+import signal
 import sys
 import os
-import re
+
+GLOBAL_TIMEOUT = 300  # 5分钟全局超时
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from src.config import BASE_URL, SALE_URL
+from src.config import BASE_URL
 from src.database import (
-    init_db, upsert_game, insert_price,
-    get_latest_price_by_eshop_id, save_alerts,
+    init_db, upsert_game, insert_price, save_alerts,
 )
-from src.browser import create_browser, navigate, close_browser
-from src.scraper import scrape_page
+from src.browser import create_browser, close_browser
+from src.scraper import scrape_all_pages
 from src.price_tracker import detect_changes
+
+SALE_URL_TEMPLATE = BASE_URL + "/download-code/sale?product_list_limit=48&p={page}"
 
 
 def parse_price(value):
@@ -26,23 +29,28 @@ def parse_price(value):
         return None
 
 
+def _timeout_handler(signum, frame):
+    print(f"\n❌ 全局超时（{GLOBAL_TIMEOUT}秒），强制退出")
+    close_browser()
+    sys.exit(2)
+
+
 def main():
+    signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.alarm(GLOBAL_TIMEOUT)
+
     init_db()
 
     print("启动浏览器...")
     browser, page = create_browser(headless=True)
 
     try:
-        url = BASE_URL + SALE_URL
-        print(f"正在爬取减价页: {url}")
+        print("正在爬取减价页（所有页面）...")
+        items = scrape_all_pages(page, url_template=SALE_URL_TEMPLATE)
 
-        ok = navigate(page, url)
-        if not ok:
-            print("减价页加载失败")
-            return
-
-        items = scrape_page(page)
-        print(f"减价页共 {len(items)} 个商品")
+        if len(items) == 0:
+            print("❌ 减价页无商品，可能加载失败")
+            sys.exit(1)
 
         stats = {'total': 0, 'new_sale': 0, 'sale_ended': 0,
                  'price_drop': 0, 'price_increase': 0}
@@ -72,6 +80,7 @@ def main():
         print(f"价格变动: {price_changes} ({stats['new_sale']}个新折扣, {stats['sale_ended']}个折扣结束, {stats['price_drop'] + stats['price_increase']}个价格变动)")
 
     finally:
+        signal.alarm(0)
         close_browser()
 
 
