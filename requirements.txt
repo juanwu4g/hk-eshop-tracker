@@ -1,2 +1,7 @@
 playwright
 psycopg2-binary
+langchain
+langchain-anthropic
+langchain-community
+langgraph
+ddgs

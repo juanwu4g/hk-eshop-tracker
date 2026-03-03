@@ -44,6 +44,18 @@ def _fetchone_dict(cursor):
         return dict(row)
 
 
+def _fetchall_dict(cursor):
+    """从cursor取所有行，返回list[dict]"""
+    if _use_pg:
+        rows = cursor.fetchall()
+        if not rows:
+            return []
+        cols = [desc[0] for desc in cursor.description]
+        return [dict(zip(cols, row)) for row in rows]
+    else:
+        return [dict(row) for row in cursor.fetchall()]
+
+
 def init_db():
     """创建三张表（如不存在）"""
     conn = _get_conn()
@@ -272,3 +284,154 @@ def save_alerts(alerts):
     conn.commit()
     cur.close()
     conn.close()
+
+
+# === Agent 查询函数 ===
+
+def search_games_by_name(query):
+    """模糊搜索游戏名称，返回匹配的游戏列表（含最新价格和折扣信息）"""
+    conn = _get_conn()
+    cur = conn.cursor()
+    p = _placeholder()
+
+    if _use_pg:
+        cur.execute(f"""
+            SELECT g.id, g.name, g.url,
+                   ph.current_price, ph.original_price, ph.discount_percent
+            FROM games g
+            LEFT JOIN LATERAL (
+                SELECT current_price, original_price, discount_percent
+                FROM price_history
+                WHERE game_id = g.id
+                ORDER BY scanned_at DESC
+                LIMIT 1
+            ) ph ON true
+            WHERE g.name ILIKE {p}
+            ORDER BY g.name
+            LIMIT 20
+        """, (f'%{query}%',))
+    else:
+        cur.execute(f"""
+            SELECT g.id, g.name, g.url,
+                   ph.current_price, ph.original_price, ph.discount_percent
+            FROM games g
+            LEFT JOIN price_history ph ON ph.id = (
+                SELECT id FROM price_history
+                WHERE game_id = g.id
+                ORDER BY scanned_at DESC
+                LIMIT 1
+            )
+            WHERE g.name LIKE {p}
+            ORDER BY g.name
+            LIMIT 20
+        """, (f'%{query}%',))
+
+    results = _fetchall_dict(cur)
+    cur.close()
+    conn.close()
+    return results
+
+
+def get_price_history(game_id):
+    """获取某游戏的所有价格记录，按时间倒序"""
+    conn = _get_conn()
+    cur = conn.cursor()
+    p = _placeholder()
+    cur.execute(f"""
+        SELECT current_price, original_price, discount_percent, scanned_at
+        FROM price_history
+        WHERE game_id = {p}
+        ORDER BY scanned_at DESC
+    """, (game_id,))
+    results = _fetchall_dict(cur)
+    cur.close()
+    conn.close()
+    return results
+
+
+def get_current_deals():
+    """获取当前所有打折游戏（最新扫描中有折扣的），按折扣力度降序"""
+    conn = _get_conn()
+    cur = conn.cursor()
+
+    if _use_pg:
+        cur.execute("""
+            SELECT g.name, ph.current_price, ph.original_price, ph.discount_percent
+            FROM games g
+            JOIN LATERAL (
+                SELECT current_price, original_price, discount_percent
+                FROM price_history
+                WHERE game_id = g.id
+                ORDER BY scanned_at DESC
+                LIMIT 1
+            ) ph ON true
+            WHERE ph.original_price IS NOT NULL AND ph.discount_percent IS NOT NULL
+            ORDER BY ph.discount_percent DESC
+        """)
+    else:
+        cur.execute("""
+            SELECT g.name, ph.current_price, ph.original_price, ph.discount_percent
+            FROM games g
+            JOIN price_history ph ON ph.id = (
+                SELECT id FROM price_history
+                WHERE game_id = g.id
+                ORDER BY scanned_at DESC
+                LIMIT 1
+            )
+            WHERE ph.original_price IS NOT NULL AND ph.discount_percent IS NOT NULL
+            ORDER BY ph.discount_percent DESC
+        """)
+
+    results = _fetchall_dict(cur)
+    cur.close()
+    conn.close()
+    return results
+
+
+def get_price_stats(game_id):
+    """获取某游戏的价格统计：历史最低/最高/平均价、打折次数、是否历史最低"""
+    conn = _get_conn()
+    cur = conn.cursor()
+    p = _placeholder()
+
+    cur.execute(f"""
+        SELECT
+            MIN(current_price) AS min_price,
+            MAX(current_price) AS max_price,
+            AVG(current_price) AS avg_price,
+            COUNT(*) FILTER (WHERE discount_percent IS NOT NULL) AS discount_count,
+            COUNT(*) AS total_records
+        FROM price_history
+        WHERE game_id = {p}
+    """ if _use_pg else f"""
+        SELECT
+            MIN(current_price) AS min_price,
+            MAX(current_price) AS max_price,
+            AVG(current_price) AS avg_price,
+            SUM(CASE WHEN discount_percent IS NOT NULL THEN 1 ELSE 0 END) AS discount_count,
+            COUNT(*) AS total_records
+        FROM price_history
+        WHERE game_id = {p}
+    """, (game_id,))
+
+    stats = _fetchone_dict(cur)
+
+    # 查当前价格判断是否历史最低
+    cur.execute(f"""
+        SELECT current_price FROM price_history
+        WHERE game_id = {p}
+        ORDER BY scanned_at DESC
+        LIMIT 1
+    """, (game_id,))
+    latest = _fetchone_dict(cur)
+
+    cur.close()
+    conn.close()
+
+    if stats and latest:
+        stats['current_price'] = latest['current_price']
+        stats['is_lowest'] = latest['current_price'] <= stats['min_price']
+        if stats['avg_price']:
+            stats['avg_price'] = round(stats['avg_price'], 1)
+
+    return stats
