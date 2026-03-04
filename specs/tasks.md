@@ -126,3 +126,69 @@ Task 1 → Task 2 → Task 3 → Task 4 → Task 5 → Task 6
 ```
 
 每个Task完成后先单独验证，再进入下一个。
+
+## Task 7: 优化迭代（基于实际测试发现的问题）
+
+以下问题在端到端测试中发现，按优先级排序：
+
+### 7.1 对话记忆（最高优先级）
+
+**问题**：Agent没有对话记忆，每次invoke是独立的。用户刚聊完宵星傳奇，紧接着问"目前的价格是历史最低吗"，Agent不知道在说哪个游戏。"还有其他类似的吗"也无法理解上文。
+
+**修复**：使用 LangChain 的 `ConversationBufferWindowMemory`，保留最近10轮对话（k=10）。
+- 创建 memory 对象时设置 `return_messages=True`, `memory_key="chat_history"`
+- 传入 AgentExecutor
+
+**验证**：
+- 先问"宵星傳奇有打折吗"
+- 再问"目前价格是历史最低吗" → Agent应该知道在问宵星傳奇，不需要用户重复
+- 再问"还有其他类似的吗" → Agent应该知道在说JRPG或Tales系列
+
+### 7.2 Tool重构：get_price_history → get_game_detail（接受game_id）
+
+**问题**：搜索"宵星傳奇 REMASTER"时，get_price_history返回了组合包的数据而不是单独版。根本原因是Tool内部用名称匹配，ILIKE `%宵星傳奇 REMASTER%` 同时匹配了组合包（名字里也包含这个词），取了第一条。
+
+**修复**：
+- 把 `get_price_history(game_name: str)` 改为 `get_game_detail(game_id: int)`
+- 输入从游戏名改成game_id（从search_games的返回结果中获取）
+- 返回内容：游戏名、当前价格、价格历史记录、统计信息（历史最低/最高/平均、打折次数、是否历史最低）
+- Tool description: "获取某个游戏的详细价格信息和历史记录，输入game_id（从search_games结果中获取）"
+
+修复后Agent的工作流变成：
+1. search_games("宵星") → 返回两个结果，含game_id
+2. Agent看到ID:1138是单独版
+3. get_game_detail(1138) → 返回准确的价格历史
+
+**验证**：`get_game_detail(1138)` 返回宵星傳奇 REMASTER 单独版的价格历史，不是组合包的
+
+### 7.3 游戏名模糊搜索增强
+
+**问题**：搜索"传说"找不到"傳奇"，"数码宝贝"找不到"數碼寶貝"。简体中文无法匹配繁体中文。
+
+**修复**（两部分）：
+
+**A. 简繁体转换**：
+- 安装 `opencc-python-reimplemented`（纯Python，无需C编译）
+- 在 search_games Tool 内部，搜索前将用户输入转为繁体中文
+- 同时用简体原文和繁体转换后的文字各搜一次，合并去重
+- 这样"数码宝贝" → "數碼寶貝" 就能匹配了
+
+**B. 系统提示优化**：
+- 系统提示中加入："数据库中游戏名以繁体中文为主，部分含英文。搜索时如果中文搜不到结果，请尝试英文游戏名或更短的关键词。"
+- 这样Agent搜"传说系列"无结果时，会自动尝试搜"Tales"
+
+**验证**：
+- `search_games("数码宝贝")` → 能找到數碼寶貝相关游戏
+- `search_games("传说")` → 可能仍找不到（传说≠傳奇），但Agent会尝试英文"Tales"
+- `search_games("Tales")` → 能找到Tales系列游戏
+
+### 7.4 减少不必要的Tool调用
+
+**问题**：Agent重复调用同一个Tool，输入一样，结果一样，浪费token和时间。
+
+**修复**：
+- 系统提示中加入："如果一个Tool已经返回了结果，不要用相同的参数重复调用。"
+- AgentExecutor 设置 `max_iterations=8`，防止无限循环
+- 7.2的修复（改用game_id）也会减少因歧义导致的重复调用
+
+**验证**：同一个问题中，不出现对同一Tool用相同参数的重复调用

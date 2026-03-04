@@ -7,10 +7,30 @@ from src.database import (
 )
 
 
+def _to_traditional(text):
+    """简体转繁体"""
+    try:
+        from opencc import OpenCC
+        cc = OpenCC('s2t')
+        return cc.convert(text)
+    except ImportError:
+        return text
+
+
 @tool
 def search_games(query: str) -> str:
     """搜索数据库中的游戏，输入游戏名称关键词。可以用中文或英文搜索。"""
+    # 同时用原文和繁体搜索，合并去重
     results = search_games_by_name(query)
+    traditional = _to_traditional(query)
+    if traditional != query:
+        results_t = search_games_by_name(traditional)
+        seen_ids = {r['id'] for r in results}
+        for r in results_t:
+            if r['id'] not in seen_ids:
+                results.append(r)
+                seen_ids.add(r['id'])
+
     if not results:
         return f"没有找到包含「{query}」的游戏。建议尝试英文名或其他关键词。"
 
@@ -25,15 +45,20 @@ def search_games(query: str) -> str:
 
 
 @tool
-def get_price_history(game_name: str) -> str:
-    """获取某个游戏的价格历史和统计信息，输入游戏名称。"""
-    # 先搜索找到 game_id
-    results = search_games_by_name(game_name)
-    if not results:
-        return f"没有找到包含「{game_name}」的游戏。建议尝试英文名或其他关键词。"
+def get_game_detail(game_id: int) -> str:
+    """获取某个游戏的详细价格信息和历史记录，输入game_id（从search_games结果中获取）。"""
+    # 先获取游戏名称
+    from src.database import _get_conn, _placeholder, _fetchone_dict
+    conn = _get_conn()
+    cur = conn.cursor()
+    p = _placeholder()
+    cur.execute(f"SELECT id, name FROM games WHERE id = {p}", (game_id,))
+    game = _fetchone_dict(cur)
+    cur.close()
+    conn.close()
 
-    game = results[0]
-    game_id = game['id']
+    if not game:
+        return f"找不到 game_id={game_id} 的游戏。"
 
     history = db_get_price_history(game_id)
     stats = get_price_stats(game_id)
@@ -110,4 +135,4 @@ def search_metacritic(game_name: str) -> str:
     return "\n".join(lines)
 
 
-ALL_TOOLS = [search_games, get_price_history, get_current_deals, search_metacritic]
+ALL_TOOLS = [search_games, get_game_detail, get_current_deals, search_metacritic]

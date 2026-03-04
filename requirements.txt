@@ -5,3 +5,4 @@ langchain-anthropic
 langchain-community
 langgraph
 ddgs
+opencc-python-reimplemented
