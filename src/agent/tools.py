@@ -4,66 +4,90 @@ from src.database import (
     get_price_history as db_get_price_history,
     get_price_stats,
     get_current_deals as db_get_current_deals,
+    get_game_details_by_id,
+    vector_search as db_vector_search,
+    search_by_genre as db_search_by_genre,
 )
-
-
-def _to_traditional(text):
-    """简体转繁体"""
-    try:
-        from opencc import OpenCC
-        cc = OpenCC('s2t')
-        return cc.convert(text)
-    except ImportError:
-        return text
 
 
 @tool
 def search_games(query: str) -> str:
-    """搜索数据库中的游戏，输入游戏名称关键词。可以用中文或英文搜索。"""
-    # 同时用原文和繁体搜索，合并去重
-    results = search_games_by_name(query)
-    traditional = _to_traditional(query)
-    if traditional != query:
-        results_t = search_games_by_name(traditional)
-        seen_ids = {r['id'] for r in results}
-        for r in results_t:
-            if r['id'] not in seen_ids:
-                results.append(r)
-                seen_ids.add(r['id'])
+    """搜索数据库中的游戏，输入游戏名称关键词。支持中文简繁体、英文、发行商名等关键词。"""
+    from src.embedding import convert_to_traditional, convert_to_simplified, generate_embedding
+    import os
 
+    results_map = {}  # id -> result dict, 保持去重
+
+    # 1. 向量搜索（如果有OPENAI_API_KEY）
+    if os.environ.get('OPENAI_API_KEY'):
+        try:
+            query_embedding = generate_embedding(query)
+            vector_results = db_vector_search(query_embedding, limit=10)
+            for r in vector_results:
+                r['_source'] = 'vector'
+                r['_similarity'] = r.get('similarity', 0)
+                results_map[r['id']] = r
+        except Exception as e:
+            pass  # 向量搜索失败时回退到文本搜索
+
+    # 2. 文本搜索（简体+繁体+原文）
+    traditional = convert_to_traditional(query)
+    simplified = convert_to_simplified(query)
+
+    for q in set([query, traditional, simplified]):
+        for r in search_games_by_name(q):
+            if r['id'] not in results_map:
+                r['_source'] = 'text'
+                results_map[r['id']] = r
+
+    results = list(results_map.values())
     if not results:
         return f"没有找到包含「{query}」的游戏。建议尝试英文名或其他关键词。"
 
     lines = [f"找到 {len(results)} 个匹配游戏：\n"]
     for r in results:
-        price_info = f"HKD{r['current_price']}"
-        if r['discount_percent']:
+        price_info = f"HKD{r.get('current_price', '?')}"
+        if r.get('discount_percent'):
             price_info += f"（原价 HKD{r['original_price']}，{r['discount_percent']}% off）"
-        lines.append(f"- [ID:{r['id']}] {r['name']} - {price_info}")
+        extra = ""
+        if r.get('genre'):
+            extra += f" [{r['genre']}]"
+        if r.get('publisher'):
+            extra += f" - {r['publisher']}"
+        lines.append(f"- [ID:{r['id']}] {r.get('name', '?')}{extra} - {price_info}")
 
     return "\n".join(lines)
 
 
 @tool
 def get_game_detail(game_id: int) -> str:
-    """获取某个游戏的详细价格信息和历史记录，输入game_id（从search_games结果中获取）。"""
-    # 先获取游戏名称
-    from src.database import _get_conn, _placeholder, _fetchone_dict
-    conn = _get_conn()
-    cur = conn.cursor()
-    p = _placeholder()
-    cur.execute(f"SELECT id, name FROM games WHERE id = {p}", (game_id,))
-    game = _fetchone_dict(cur)
-    cur.close()
-    conn.close()
-
+    """获取某个游戏的详细信息（类型、发行商、语言、折扣时间、价格历史），输入game_id。"""
+    game = get_game_details_by_id(game_id)
     if not game:
         return f"找不到 game_id={game_id} 的游戏。"
 
     history = db_get_price_history(game_id)
     stats = get_price_stats(game_id)
 
-    lines = [f"【{game['name']}】价格信息\n"]
+    lines = [f"【{game['name']}】\n"]
+
+    # 元数据
+    if game.get('genre'):
+        lines.append(f"类型: {game['genre']}")
+    if game.get('publisher'):
+        lines.append(f"发行商: {game['publisher']}")
+    if game.get('release_date'):
+        lines.append(f"发售日: {game['release_date']}")
+    if game.get('languages'):
+        lines.append(f"支持语言: {game['languages']}")
+    if game.get('players'):
+        lines.append(f"游玩人数: {game['players']}")
+    if game.get('sale_start') and game.get('sale_end'):
+        lines.append(f"优惠期间: {game['sale_start']} ~ {game['sale_end']}")
+    elif game.get('sale_end'):
+        lines.append(f"优惠截止: {game['sale_end']}")
+
+    lines.append("")
 
     # 统计
     if stats:
@@ -111,6 +135,33 @@ def get_current_deals() -> str:
 
 
 @tool
+def search_by_genre(genre: str) -> str:
+    """按游戏类型搜索，如角色扮演、动作、模擬、益智、冒險、派對等。"""
+    from src.embedding import convert_to_traditional
+
+    # 简→繁转换（数据库中类型是繁体）
+    genre_t = convert_to_traditional(genre)
+
+    results = []
+    for q in set([genre, genre_t]):
+        for r in db_search_by_genre(q):
+            if not any(x['id'] == r['id'] for x in results):
+                results.append(r)
+
+    if not results:
+        return f"没有找到类型包含「{genre}」的游戏。"
+
+    lines = [f"找到 {len(results)} 个「{genre}」类游戏：\n"]
+    for r in results:
+        price_info = f"HKD{r.get('current_price', '?')}"
+        if r.get('discount_percent'):
+            price_info += f"（{r['discount_percent']}% off）"
+        lines.append(f"- [ID:{r['id']}] {r['name']} [{r.get('genre', '')}] - {price_info}")
+
+    return "\n".join(lines)
+
+
+@tool
 def search_metacritic(game_name: str) -> str:
     """搜索游戏的Metacritic评分，输入游戏英文名。"""
     from ddgs import DDGS
@@ -135,4 +186,4 @@ def search_metacritic(game_name: str) -> str:
     return "\n".join(lines)
 
 
-ALL_TOOLS = [search_games, get_game_detail, get_current_deals, search_metacritic]
+ALL_TOOLS = [search_games, get_game_detail, get_current_deals, search_by_genre, search_metacritic]

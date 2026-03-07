@@ -103,6 +103,25 @@ def init_db():
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_alerts_created ON price_alerts(created_at DESC)
         """)
+        # Phase 4: pgvector + game_details
+        cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS game_details (
+                game_id INTEGER PRIMARY KEY REFERENCES games(id),
+                description TEXT,
+                genre VARCHAR(100),
+                publisher VARCHAR(200),
+                release_date DATE,
+                languages VARCHAR(500),
+                players VARCHAR(50),
+                sale_start TIMESTAMP,
+                sale_end TIMESTAMP,
+                search_text TEXT,
+                name_embedding vector(1536),
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
         conn.commit()
     else:
         conn.executescript("""
@@ -435,3 +454,182 @@ def get_price_stats(game_id):
             stats['avg_price'] = round(stats['avg_price'], 1)
 
     return stats
+
+
+# === Phase 4: game_details 函数 ===
+
+def insert_game_details(game_id, details):
+    """插入或更新game_details记录（只更新非None字段）"""
+    conn = _get_conn()
+    cur = conn.cursor()
+
+    # 构建动态字段列表（只包含非None值）
+    fields = ['game_id']
+    values = [game_id]
+    update_parts = []
+
+    for key in ('description', 'genre', 'publisher', 'release_date',
+                'languages', 'players', 'sale_start', 'sale_end'):
+        if details.get(key) is not None:
+            fields.append(key)
+            values.append(details[key])
+            update_parts.append(f"{key} = EXCLUDED.{key}")
+
+    update_parts.append("updated_at = NOW()")
+
+    placeholders = ', '.join(['%s'] * len(values))
+    field_names = ', '.join(fields)
+    update_sql = ', '.join(update_parts)
+
+    cur.execute(f"""
+        INSERT INTO game_details ({field_names})
+        VALUES ({placeholders})
+        ON CONFLICT (game_id) DO UPDATE SET {update_sql}
+    """, values)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_games_without_details():
+    """获取还没爬过详情页的游戏"""
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT g.id, g.eshop_id, g.name, g.url
+        FROM games g
+        LEFT JOIN game_details gd ON g.id = gd.game_id
+        WHERE gd.game_id IS NULL
+        ORDER BY g.id
+    """)
+    results = _fetchall_dict(cur)
+    cur.close()
+    conn.close()
+    return results
+
+
+def get_details_without_search_text():
+    """获取有description但没有search_text的游戏"""
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT gd.game_id, g.name, gd.description, gd.genre, gd.publisher
+        FROM game_details gd
+        JOIN games g ON g.id = gd.game_id
+        WHERE gd.description IS NOT NULL AND gd.search_text IS NULL
+        ORDER BY gd.game_id
+    """)
+    results = _fetchall_dict(cur)
+    cur.close()
+    conn.close()
+    return results
+
+
+def update_search_text(game_id, search_text):
+    """更新search_text字段"""
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE game_details SET search_text = %s, updated_at = NOW() WHERE game_id = %s",
+        (search_text, game_id)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def update_embedding(game_id, embedding):
+    """更新name_embedding向量字段"""
+    conn = _get_conn()
+    cur = conn.cursor()
+    embedding_str = '[' + ','.join(str(x) for x in embedding) + ']'
+    cur.execute(
+        "UPDATE game_details SET name_embedding = %s::vector, updated_at = NOW() WHERE game_id = %s",
+        (embedding_str, game_id)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_games_without_embedding():
+    """获取有search_text但没有embedding的游戏"""
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT game_id, search_text
+        FROM game_details
+        WHERE name_embedding IS NULL AND search_text IS NOT NULL
+        ORDER BY game_id
+    """)
+    results = _fetchall_dict(cur)
+    cur.close()
+    conn.close()
+    return results
+
+
+def vector_search(query_embedding, limit=10):
+    """向量相似度搜索"""
+    conn = _get_conn()
+    cur = conn.cursor()
+    embedding_str = '[' + ','.join(str(x) for x in query_embedding) + ']'
+    cur.execute("""
+        SELECT g.id, g.name, g.eshop_id, g.url,
+               gd.genre, gd.publisher, gd.languages, gd.players,
+               gd.release_date, gd.sale_start, gd.sale_end,
+               1 - (gd.name_embedding <=> %s::vector) AS similarity
+        FROM game_details gd
+        JOIN games g ON g.id = gd.game_id
+        WHERE gd.name_embedding IS NOT NULL
+        ORDER BY gd.name_embedding <=> %s::vector
+        LIMIT %s
+    """, (embedding_str, embedding_str, limit))
+    results = _fetchall_dict(cur)
+    cur.close()
+    conn.close()
+    return results
+
+
+def get_game_details_by_id(game_id):
+    """获取单个游戏的详情信息（含game_details元数据）"""
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT g.id, g.name, g.url,
+               gd.genre, gd.publisher, gd.languages, gd.players,
+               gd.release_date, gd.sale_start, gd.sale_end, gd.description
+        FROM games g
+        LEFT JOIN game_details gd ON g.id = gd.game_id
+        WHERE g.id = %s
+    """, (game_id,))
+    result = _fetchone_dict(cur)
+    cur.close()
+    conn.close()
+    return result
+
+
+def search_by_genre(genre_keyword, limit=20):
+    """按游戏类型搜索，返回带最新价格的列表"""
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT g.id, g.name, gd.genre, gd.publisher,
+               ph.current_price, ph.original_price, ph.discount_percent
+        FROM game_details gd
+        JOIN games g ON g.id = gd.game_id
+        LEFT JOIN LATERAL (
+            SELECT current_price, original_price, discount_percent
+            FROM price_history
+            WHERE game_id = g.id
+            ORDER BY scanned_at DESC
+            LIMIT 1
+        ) ph ON true
+        WHERE gd.genre ILIKE %s
+        ORDER BY ph.discount_percent DESC NULLS LAST, g.name
+        LIMIT %s
+    """, (f'%{genre_keyword}%', limit))
+    results = _fetchall_dict(cur)
+    cur.close()
+    conn.close()
+    return results

@@ -6,3 +6,5 @@ langchain-community
 langgraph
 ddgs
 opencc-python-reimplemented
+openai
+pgvector
