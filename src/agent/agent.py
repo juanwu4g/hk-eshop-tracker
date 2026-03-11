@@ -15,7 +15,11 @@ SYSTEM_PROMPT = """你是香港Nintendo eShop的折扣分析师。你可以：
 回答时用中文。价格单位是HKD（港币）。
 如果用户描述模糊，先搜索再推荐，不要猜测。
 如果用户问折扣时间，注意检查sale_end是否已过期。
-如果一个Tool已经返回了结果，不要用相同的参数重复调用。"""
+
+关于历史对话和Tool调用的规则：
+- 每轮先判断用户是否在引用上文（如"这个"、"它"、"刚才那个"、"历史最低吗"）。如果是，使用历史context中的信息。如果是全新的问题，独立判断该调用什么Tool，不要重复调用历史中已有的搜索。
+- 一个问题通常只需要1-3次Tool调用就够了。不要用相同参数重复调用同一个Tool。
+- 只调用和当前问题直接相关的Tool，不要发散搜索不相关的内容。"""
 
 
 def create_agent(debug=False):
@@ -42,10 +46,23 @@ def create_agent(debug=False):
 def ask(agent, question, verbose=True, thread_id="default"):
     """向Agent提问，返回回答文本。通过 thread_id 维持对话记忆。"""
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 20}
+
+    # 记录invoke前的历史消息数量，用于只打印本轮新增的消息
+    try:
+        state = agent.get_state(config)
+        prev_count = len(state.values.get("messages", []))
+    except Exception:
+        prev_count = 0
+
+    if verbose:
+        print(f"\n===== 新问题: {question} =====")
+
     result = agent.invoke({"messages": [("human", question)]}, config=config)
 
     if verbose:
-        for msg in result["messages"]:
+        # 只打印本轮新增的消息（跳过历史）
+        new_messages = result["messages"][prev_count:]
+        for msg in new_messages:
             if msg.type == "ai" and hasattr(msg, "tool_calls") and msg.tool_calls:
                 for tc in msg.tool_calls:
                     print(f"  🔧 调用 {tc['name']}({tc['args']})")
